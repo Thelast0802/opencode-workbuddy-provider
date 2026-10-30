@@ -66,7 +66,13 @@ async function runTests() {
     const data = JSON.parse(resp.body);
     if (resp.status === 200 && typeof data.enabled === 'boolean') {
       console.log('✅ Status 通过');
-      console.log('   状态:', data);
+      console.log('   状态:', data.account ? `${data.account.nickname} (${data.account.uid})` : '未登录');
+      if (data.hardened && data.hardened.active) {
+        console.log(`   🛡️ 协议加固正常: App ${data.hardened.appVersion} / CLI ${data.hardened.cliVersion} (${data.hardened.source})`);
+        console.log(`      加固特性: ${data.hardened.features.join(', ')}`);
+      } else {
+        console.log('   ⚠️ 未检测到加固元数据');
+      }
     } else {
       console.log('❌ Status 失败:', resp);
     }

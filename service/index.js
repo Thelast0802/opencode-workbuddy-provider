@@ -26,6 +26,86 @@ const { URL } = require('url');
 
 const GATEWAY_PORT = Number(process.env.WORKBUDDY_GATEWAY_PORT || 18889);
 
+/**
+ * 补丁 01 · 运行时动态版本同步 (Version Sync)
+ * 动态检测本机真实安装的 WorkBuddy / CodeBuddy 桌面端与 CLI 版本，彻底告别硬编码老版本导致的 WAF 标黑
+ */
+function resolveClientVersion() {
+  const fallback = { appVersion: '5.9.4', cliVersion: '2.165.0' };
+  try {
+    if (process.platform === 'darwin') {
+      const candidates = [
+        '/Applications/WorkBuddy AI.app',
+        '/Applications/WorkBuddy.app',
+        '/Applications/CodeBuddy.app',
+        path.join(os.homedir(), 'Applications/WorkBuddy AI.app'),
+        path.join(os.homedir(), 'Applications/WorkBuddy.app'),
+      ];
+      for (const app of candidates) {
+        const plistPath = path.join(app, 'Contents/Info.plist');
+        if (fs.existsSync(plistPath)) {
+          const plistText = fs.readFileSync(plistPath, 'utf8');
+          const m = plistText.match(/<key>CFBundleShortVersionString<\/key>\s*<string>([^<]+)<\/string>/);
+          const appVersion = m ? m[1].trim() : fallback.appVersion;
+          let cliVersion = fallback.cliVersion;
+          const cliPkgPath = path.join(app, 'Contents/Resources/app.asar.unpacked/cli/package.json');
+          if (fs.existsSync(cliPkgPath)) {
+            try {
+              const pkg = JSON.parse(fs.readFileSync(cliPkgPath, 'utf8'));
+              if (pkg && pkg.version) cliVersion = String(pkg.version).trim();
+            } catch {}
+          }
+          return { appVersion, cliVersion, source: app };
+        }
+      }
+    } else if (process.platform === 'win32') {
+      const roots = [];
+      if (process.env.WORKBUDDY_APP_EXECUTABLE) roots.push(path.dirname(process.env.WORKBUDDY_APP_EXECUTABLE));
+      if (process.env.LOCALAPPDATA) roots.push(path.join(process.env.LOCALAPPDATA, 'Programs', 'WorkBuddy'));
+      if (process.env.PROGRAMFILES) roots.push(path.join(process.env.PROGRAMFILES, 'WorkBuddy'));
+      if (process.env['PROGRAMFILES(X86)']) roots.push(path.join(process.env['PROGRAMFILES(X86)'], 'WorkBuddy'));
+      for (const r of roots) {
+        const manifestPath = path.join(r, 'resources', 'install-manifest.json');
+        if (fs.existsSync(manifestPath)) {
+          try {
+            const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+            const appVersion = manifest && manifest.appVersion ? String(manifest.appVersion).trim() : fallback.appVersion;
+            let cliVersion = fallback.cliVersion;
+            const cliPkgPath = path.join(r, 'resources', 'app.asar.unpacked', 'cli', 'package.json');
+            if (fs.existsSync(cliPkgPath)) {
+              const pkg = JSON.parse(fs.readFileSync(cliPkgPath, 'utf8'));
+              if (pkg && pkg.version) cliVersion = String(pkg.version).trim();
+            }
+            return { appVersion, cliVersion, source: r };
+          } catch {}
+        }
+      }
+    } else if (process.platform === 'linux') {
+      const roots = ['/opt/WorkBuddy', '/usr/share/workbuddy'];
+      for (const r of roots) {
+        const manifestPath = path.join(r, 'resources', 'install-manifest.json');
+        if (fs.existsSync(manifestPath)) {
+          try {
+            const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+            const appVersion = manifest && manifest.appVersion ? String(manifest.appVersion).trim() : fallback.appVersion;
+            let cliVersion = fallback.cliVersion;
+            const cliPkgPath = path.join(r, 'resources', 'app.asar.unpacked', 'cli', 'package.json');
+            if (fs.existsSync(cliPkgPath)) {
+              const pkg = JSON.parse(fs.readFileSync(cliPkgPath, 'utf8'));
+              if (pkg && pkg.version) cliVersion = String(pkg.version).trim();
+            }
+            return { appVersion, cliVersion, source: r };
+          } catch {}
+        }
+      }
+    }
+  } catch {}
+  return { ...fallback, source: 'fallback' };
+}
+
+const clientVersions = resolveClientVersion();
+const DYNAMIC_USER_AGENT = `WorkBuddy/${clientVersions.appVersion} WorkBuddy/${clientVersions.appVersion} CLI/${clientVersions.cliVersion}`;
+
 const REGIONS = {
   intl: {
     id: 'intl',
@@ -34,10 +114,11 @@ const REGIONS = {
     apiDomain: 'www.workbuddy.ai',
     platform: 'workbuddy-ai',
     productCode: 'workbuddy',
-    userAgent: 'WorkBuddy/5.8.4 workbuddy-ai/5.8.4 CLI/2.161.0',
+    userAgent: DYNAMIC_USER_AGENT,
     deploymentType: 'SaaS',
     refreshSource: 'ide-main',
-    version: '5.8.4',
+    version: clientVersions.appVersion,
+    cliVersion: clientVersions.cliVersion,
     defaultCredits: 100.0,
     providerName: 'WorkBuddy (Intl)',
   },
@@ -48,10 +129,11 @@ const REGIONS = {
     apiDomain: 'copilot.tencent.com',
     platform: 'codebuddy',
     productCode: 'codebuddy',
-    userAgent: 'WorkBuddy/5.5.6 WorkBuddy/5.5.6 CLI/2.137.1',
+    userAgent: DYNAMIC_USER_AGENT,
     deploymentType: 'SaaS',
     refreshSource: 'ide-main',
-    version: '5.5.6',
+    version: clientVersions.appVersion,
+    cliVersion: clientVersions.cliVersion,
     defaultCredits: 100.0,
     providerName: 'CodeBuddy (CN)',
   },
@@ -1012,8 +1094,8 @@ function buildChatHeaders(accessToken, payloadLength) {
     'X-Agent-Purpose': 'conversation',
     'X-Agent-Type': 'main',
     'X-IDE-Name': 'WorkBuddy',
-    'X-IDE-Type': 'WorkBuddy',
-    'X-IDE-Version': activeRegion.version || '5.8.4',
+    'X-IDE-Type': 'CLI',
+    'X-IDE-Version': activeRegion.version || clientVersions.appVersion || '5.9.4',
     'X-Private-Data': 'true',
     'X-User-Id': String(uid),
     ...buildTraceHeaders(),
@@ -1326,9 +1408,121 @@ function runLoginBackground(stateId) {
 
 // ─────────────────────── 上游聊天（SSE 透传） ───────────────────────
 
-function buildUpstreamBody(requestBody) {
+// ─────────────────────── 补丁 02 · 提示词特征清洗与隐形断点 (Identity Sanitizer) ───────────────────────
+
+const ZERO_WIDTH_SPACE = '\u200B';
+const WORKBUDDY_FALLBACK_SYSTEM_PROMPT = 'You are a helpful assistant.';
+
+const UNAPPROVED_CHANNEL_OPENINGS = [
+  'you are an ai agent powered by',
+  'you are claude code',
+  'you are opencode',
+  'you are an autonomous agent',
+  'you are an ai coding assistant',
+  'you are an interactive cli tool',
+  'you are a powerful agentic ai',
+  'the runtime context names',
+];
+
+const IDENTITY_CLAUSE_REGEX = /(you)(\s+are\s+(?:(?:an?\s+)?[\w-]*\s*agent\s+powered\s+by|interacting\s+with\s+the\s+user\s+through\s+the\s+(?:deepseek\s+harness|opencode)))|((?:current|the\s+runtime\s+context\s+names\s+the)\s+(?:deepseek\s+harness|opencode)\s+(?:implementation\s+checkout|web\s+gui\s+url))/giu;
+
+function isUnapprovedChannelOpening(text) {
+  if (typeof text !== 'string') return false;
+  const opening = text.replace(/^\s+/u, '').toLowerCase();
+  return UNAPPROVED_CHANNEL_OPENINGS.some((prefix) => opening.startsWith(prefix));
+}
+
+function breakIdentityClauses(text) {
+  if (typeof text !== 'string') return text;
+  return text.replace(IDENTITY_CLAUSE_REGEX, (clause) => clause.replace(/(\s+)/gu, `$1${ZERO_WIDTH_SPACE}`));
+}
+
+function sanitizePromptText(text) {
+  if (typeof text !== 'string' || text.length === 0) return text;
+  const headPrepend = isUnapprovedChannelOpening(text) ? `${WORKBUDDY_FALLBACK_SYSTEM_PROMPT}\n\n${text}` : text;
+  return breakIdentityClauses(headPrepend);
+}
+
+function sanitizeMessages(messages) {
+  const result = [];
+  for (const m of messages) {
+    if (!m || typeof m !== 'object') continue;
+    const cloned = { ...m };
+    if (cloned.role === 'developer') {
+      cloned.role = 'system';
+    }
+    if (cloned.role === 'system' || cloned.role === 'assistant') {
+      if (typeof cloned.content === 'string') {
+        cloned.content = sanitizePromptText(cloned.content);
+      } else if (Array.isArray(cloned.content)) {
+        cloned.content = cloned.content.map((part) => {
+          if (part && part.type === 'text' && typeof part.text === 'string') {
+            return { ...part, text: sanitizePromptText(part.text) };
+          }
+          return part;
+        });
+      }
+    }
+    result.push(cloned);
+  }
+  return result;
+}
+
+// ─────────────────────── 补丁 04 · 单模型 6004 限流同账号迂回 (Model Detour) ───────────────────────
+
+function bodyDeclaresImage(requestBody) {
   const messages = Array.isArray(requestBody.messages) ? requestBody.messages : [];
+  for (const m of messages) {
+    if (!m || !Array.isArray(m.content)) continue;
+    for (const part of m.content) {
+      if (!part || typeof part !== 'object') continue;
+      if (part.type === 'image_url' || part.type === 'image' || part.type === 'input_image') return true;
+    }
+  }
+  return false;
+}
+
+const DETOUR_LADDER_ORDER = [
+  'hy4-preview',
+  'glm-5.3',
+  'glm-5.2',
+  'kimi-k2.8-preview',
+  'kimi-k3',
+  'deepseek-v4-pro',
+  'deepseek-v3.2',
+  'gpt-5.6-terra',
+  'primary-model',
+];
+
+function getDetourCandidateModels(requestBody, currentModel) {
+  const disabledSet = new Set(state.disabledModels || []);
+  const available = (state.models || []).filter((m) => !disabledSet.has(m.id) && m.id !== currentModel);
+  const needsImage = bodyDeclaresImage(requestBody);
+
+  const candidates = [];
+  for (const preferred of DETOUR_LADDER_ORDER) {
+    const found = available.find((m) => m.id === preferred);
+    if (found) {
+      if (needsImage && !found.supportsImages) continue;
+      candidates.push(found.id);
+      if (candidates.length >= 3) return candidates;
+    }
+  }
+  for (const m of available) {
+    if (!candidates.includes(m.id) && !/default-model|auto|fast-model|balanced-model/i.test(m.id)) {
+      if (needsImage && !m.supportsImages) continue;
+      candidates.push(m.id);
+      if (candidates.length >= 3) break;
+    }
+  }
+  return candidates;
+}
+
+function buildUpstreamBody(requestBody) {
+  const rawMessages = Array.isArray(requestBody.messages) ? requestBody.messages : [];
   const model = String(requestBody.model || '');
+  const messages = sanitizeMessages(rawMessages);
+
   const wire = messages.map((m) => {
     if (m && m.role === 'assistant') {
       return { ...m, reasoning_content: m.reasoning_content || '' };
@@ -1340,8 +1534,10 @@ function buildUpstreamBody(requestBody) {
   if (wire.length === 0 || wire[0].role !== 'system') {
     wire.unshift({
       role: 'system',
-      content: 'You are a helpful assistant.',
+      content: WORKBUDDY_FALLBACK_SYSTEM_PROMPT,
     });
+  } else if (!wire[0].content || (typeof wire[0].content === 'string' && wire[0].content.trim().length === 0)) {
+    wire[0].content = WORKBUDDY_FALLBACK_SYSTEM_PROMPT;
   }
 
   // WorkBuddy 上游拒绝非流式请求（code 11101），必须始终 stream: true
@@ -1530,70 +1726,104 @@ function probeModel(model, accessToken, timeoutMs = 30000) {
  * 代理 chat completions：
  * 1. 客户端如果要求 stream: true -> 真流式透传
  * 2. 客户端如果要求 stream: false -> 自动将上游 SSE 汇聚为标准 ChatCompletion JSON
+ * 3. 补丁 03 · 封号强隔离 (Account Quarantine): 11140 严禁自动换号重放，彻底熔断保护小号池
+ * 4. 补丁 04 · 单模型 6004 限流同账号迂回 (Model Detour): 单模型频控同账号换模型重试，不骚扰其他小号
  */
-function proxyChatCompletion(requestBody, res) {
+function proxyChatCompletion(originalRequestBody, res) {
   return new Promise((resolve) => {
-    const model = String(requestBody.model || '');
-    const clientWantsStream = requestBody.stream !== false;
-    const inputTokens = estimateInputTokens(requestBody);
-    const upstreamBody = buildUpstreamBody(requestBody);
-    const payload = JSON.stringify(upstreamBody);
+    function sendAttempt(requestBody, attempt = 0) {
+      const model = String(requestBody.model || '');
+      const clientWantsStream = requestBody.stream !== false;
+      const inputTokens = estimateInputTokens(requestBody);
+      const upstreamBody = buildUpstreamBody(requestBody);
+      const payload = JSON.stringify(upstreamBody);
 
-    let url;
-    try {
-      url = new URL(`${WORKBUDDY.endpoint}/v2/chat/completions`);
-    } catch (error) {
-      res.writeHead(500, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: { message: String(error) } }));
-      resolve();
-      return;
-    }
-
-    const startedAt = Date.now();
-    let ttftMs = null;
-    let outputChars = 0;
-    let settled = false;
-
-    const finish = (code) => {
-      if (settled) return;
-      settled = true;
-      const generationMs = Math.max(0, Date.now() - startedAt - (ttftMs || 0));
-      if (code === 200) {
-        recordUsage({
-          model,
-          inputTokens,
-          outputTokens: estimateTokens('x'.repeat(Math.min(outputChars, 2_000_000))),
-          generationMs,
-        });
+      let url;
+      try {
+        url = new URL(`${WORKBUDDY.endpoint}/v2/chat/completions`);
+      } catch (error) {
+        if (!res.headersSent) {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: { message: String(error) } }));
+        }
+        resolve();
+        return;
       }
-      resolve();
-    };
 
-    const req = pickClientFor(url.toString()).request(
-      {
-        method: 'POST',
-        hostname: url.hostname,
-        port: url.port || 443,
-        path: url.pathname,
-        headers: buildChatHeaders(state.credential.access_token, Buffer.byteLength(payload)),
-      },
-      (up) => {
-        if (up.statusCode && up.statusCode >= 400) {
-          let errData = '';
-          up.on('data', (c) => { errData += c; });
-          up.on('end', () => {
-            log(`上游请求失败 HTTP ${up.statusCode} (${model}):`, errData.slice(0, 300));
-            try {
-              const errObj = parseJSON(errData);
-              if (errObj && (errObj.code === 11140 || /11140/i.test(errData))) {
+      const startedAt = Date.now();
+      let ttftMs = null;
+      let outputChars = 0;
+      let settled = false;
+
+      const finish = (code) => {
+        if (settled) return;
+        settled = true;
+        const generationMs = Math.max(0, Date.now() - startedAt - (ttftMs || 0));
+        if (code === 200) {
+          recordUsage({
+            model,
+            inputTokens,
+            outputTokens: estimateTokens('x'.repeat(Math.min(outputChars, 2_000_000))),
+            generationMs,
+          });
+        }
+        resolve();
+      };
+
+      const req = pickClientFor(url.toString()).request(
+        {
+          method: 'POST',
+          hostname: url.hostname,
+          port: url.port || 443,
+          path: url.pathname,
+          headers: buildChatHeaders(state.credential.access_token, Buffer.byteLength(payload)),
+        },
+        (up) => {
+          if (up.statusCode && up.statusCode >= 400) {
+            let errData = '';
+            up.on('data', (c) => { errData += c; });
+            up.on('end', () => {
+              log(`上游请求失败 HTTP ${up.statusCode} (${model}):`, errData.slice(0, 300));
+              const errObj = parseJSON(errData) || {};
+              const is11140 = errObj.code === 11140 || /11140/i.test(errData) || /账号存在异常行为/i.test(errData);
+              const is6004 = up.statusCode === 429 || errObj.code === 6004 || /6004/i.test(errData) || /频率限制/i.test(errData);
+
+              // 补丁 03 · 封号强隔离：发现 11140 严禁将相同请求重放给其他小号，直接熔断报错，保全小号池！
+              if (is11140) {
                 const curAcc = getActiveAccount();
                 if (curAcc) {
                   curAcc.status = 'restricted';
-                  curAcc.statusNote = '11140: 账号存在异常行为，已被限制使用';
+                  curAcc.statusNote = '11140: 账号已被上游风控限制使用';
                   saveState();
-                  log(`⚠️ 当前账号已自动标记为受限 (11140)：${curAcc.nickname || curAcc.uid}`);
+                  log(`🚨 当前账号触发 11140 限制，已启动安全熔断阻断自动换号！绝不将相同请求重放至其它小号！(${curAcc.nickname || curAcc.uid})`);
                 }
-              } else if (up.statusCode === 401) {
+                if (!res.headersSent) {
+                  res.writeHead(403, { 'Content-Type': 'application/json; charset=utf-8' });
+                  res.end(JSON.stringify({
+                    error: {
+                      code: 'account_restricted',
+                      message: '账号存在异常行为，已被限制使用 (11140)。已触发安全熔断保护其余小号。请停止高频请求或在官方申诉。',
+                      raw: errObj,
+                    },
+                  }));
+                }
+                finish(403);
+                return;
+              }
+
+              // 补丁 04 · 单模型 6004 频控同账号平滑降级迂回（Model Detour）
+              if (is6004 && attempt < 3) {
+                const detourModels = getDetourCandidateModels(requestBody, model);
+                if (detourModels.length > 0) {
+                  const substituteModel = detourModels[attempt % detourModels.length];
+                  log(`🔄 模型 ${model} 触发单模型 6004 频控窗口（单账号单模型限额），启动同账号平滑迂回至备选模型: ${substituteModel} (第 ${attempt + 1} 梯队)...`);
+                  const nextRequestBody = { ...requestBody, model: substituteModel };
+                  sendAttempt(nextRequestBody, attempt + 1);
+                  return;
+                }
+              }
+
+              if (up.statusCode === 401) {
                 const curAcc = getActiveAccount();
                 if (curAcc) {
                   curAcc.status = 'expired';
@@ -1601,143 +1831,200 @@ function proxyChatCompletion(requestBody, res) {
                   saveState();
                 }
               }
-            } catch {}
-            res.writeHead(up.statusCode, { 'Content-Type': 'application/json; charset=utf-8' });
-            res.end(errData || JSON.stringify({ error: { message: `Upstream HTTP ${up.statusCode}` } }));
-            finish(up.statusCode);
-          });
-          return;
-        }
 
-        if (clientWantsStream) {
-          res.writeHead(up.statusCode || 200, {
-            'Content-Type': 'text/event-stream; charset=utf-8',
-            'Cache-Control': 'no-cache, no-transform',
-            Connection: 'keep-alive',
-            'X-Accel-Buffering': 'no',
-          });
-          up.on('data', (chunk) => {
-            if (ttftMs === null) ttftMs = Date.now() - startedAt;
-            outputChars += chunk.length;
-            res.write(chunk);
-          });
-          up.on('end', () => {
-            res.write('data: [DONE]\n\n');
-            res.end();
-            finish(200);
-          });
-          up.on('error', (err) => {
-            log('Upstream stream error:', err.message);
-            res.end();
-            finish(500);
-          });
-        } else {
-          let accumulatedContent = '';
-          let accumulatedReasoning = '';
-          let chunkId = 'chatcmpl-' + crypto.randomUUID();
-          let finishReason = 'stop';
-          let sseBuffer = '';
-          const toolCallsMap = new Map();
+              if (!res.headersSent) {
+                res.writeHead(up.statusCode, { 'Content-Type': 'application/json; charset=utf-8' });
+                res.end(errData || JSON.stringify({ error: { message: `Upstream HTTP ${up.statusCode}` } }));
+              }
+              finish(up.statusCode);
+            });
+            return;
+          }
 
-          up.on('data', (chunk) => {
-            if (ttftMs === null) ttftMs = Date.now() - startedAt;
-            outputChars += chunk.length;
-            sseBuffer += chunk.toString('utf8');
-            const lines = sseBuffer.split('\n');
-            sseBuffer = lines.pop() || '';
-            for (const line of lines) {
-              const trimmed = line.trim();
-              if (!trimmed.startsWith('data:')) continue;
-              const jsonStr = trimmed.slice(5).trim();
-              if (jsonStr === '[DONE]') continue;
-              const data = parseJSON(jsonStr);
-              if (data) {
-                if (data.id) chunkId = data.id;
-                if (Array.isArray(data.choices) && data.choices[0]) {
-                  const choice = data.choices[0];
-                  if (choice.delta) {
-                    if (choice.delta.content) accumulatedContent += choice.delta.content;
-                    if (choice.delta.reasoning_content) accumulatedReasoning += choice.delta.reasoning_content;
-                    if (choice.delta.reasoning) accumulatedReasoning += choice.delta.reasoning;
-                    if (Array.isArray(choice.delta.tool_calls)) {
-                      for (const tc of choice.delta.tool_calls) {
-                        const idx = tc.index ?? 0;
-                        if (!toolCallsMap.has(idx)) {
-                          toolCallsMap.set(idx, {
-                            id: tc.id || `call_${crypto.randomUUID().slice(0, 8)}`,
-                            type: tc.type || 'function',
-                            function: { name: tc.function?.name || '', arguments: tc.function?.arguments || '' },
-                          });
-                        } else {
-                          const existing = toolCallsMap.get(idx);
-                          if (tc.id) existing.id = tc.id;
-                          if (tc.function?.name) existing.function.name += tc.function.name;
-                          if (tc.function?.arguments) existing.function.arguments += tc.function.arguments;
+          if (clientWantsStream) {
+            let streamHeadersWritten = false;
+            let streamChunkBuffer = '';
+
+            up.on('data', (chunk) => {
+              if (ttftMs === null) ttftMs = Date.now() - startedAt;
+              outputChars += chunk.length;
+
+              if (!streamHeadersWritten) {
+                streamChunkBuffer += chunk.toString('utf8');
+                // 检测上游是否在 200 流的开头返回了异常拦截错误 JSON
+                if (streamChunkBuffer.includes('"code":11140') || streamChunkBuffer.includes('账号存在异常行为')) {
+                  const curAcc = getActiveAccount();
+                  if (curAcc) {
+                    curAcc.status = 'restricted';
+                    curAcc.statusNote = '11140: 账号已被上游风控限制使用';
+                    saveState();
+                    log(`🚨 当前账号触发 11140 限制，已启动安全熔断阻断自动换号！(${curAcc.nickname || curAcc.uid})`);
+                  }
+                  res.writeHead(403, { 'Content-Type': 'application/json; charset=utf-8' });
+                  res.end(JSON.stringify({
+                    error: {
+                      code: 'account_restricted',
+                      message: '账号存在异常行为，已被限制使用 (11140)。已触发安全熔断保护其余小号。',
+                    },
+                  }));
+                  finish(403);
+                  return;
+                }
+
+                // 检测是否在首包返回了 6004 频控
+                if (streamChunkBuffer.includes('"code":6004') || streamChunkBuffer.includes('频率限制')) {
+                  if (attempt < 3) {
+                    const detourModels = getDetourCandidateModels(requestBody, model);
+                    if (detourModels.length > 0) {
+                      const substituteModel = detourModels[attempt % detourModels.length];
+                      log(`🔄 流式首包检测到 6004 频控，启动同账号平滑迂回至备选模型: ${substituteModel}...`);
+                      sendAttempt({ ...requestBody, model: substituteModel }, attempt + 1);
+                      return;
+                    }
+                  }
+                }
+
+                res.writeHead(up.statusCode || 200, {
+                  'Content-Type': 'text/event-stream; charset=utf-8',
+                  'Cache-Control': 'no-cache, no-transform',
+                  Connection: 'keep-alive',
+                  'X-Accel-Buffering': 'no',
+                });
+                streamHeadersWritten = true;
+              }
+
+              res.write(chunk);
+            });
+
+            up.on('end', () => {
+              if (streamHeadersWritten) {
+                res.write('data: [DONE]\n\n');
+                res.end();
+              }
+              finish(200);
+            });
+
+            up.on('error', (err) => {
+              log('Upstream stream error:', err.message);
+              if (!res.headersSent) {
+                res.writeHead(500, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: { message: err.message } }));
+              } else {
+                res.end();
+              }
+              finish(500);
+            });
+          } else {
+            let accumulatedContent = '';
+            let accumulatedReasoning = '';
+            let chunkId = 'chatcmpl-' + crypto.randomUUID();
+            let finishReason = 'stop';
+            let sseBuffer = '';
+            const toolCallsMap = new Map();
+
+            up.on('data', (chunk) => {
+              if (ttftMs === null) ttftMs = Date.now() - startedAt;
+              outputChars += chunk.length;
+              sseBuffer += chunk.toString('utf8');
+              const lines = sseBuffer.split('\n');
+              sseBuffer = lines.pop() || '';
+              for (const line of lines) {
+                const trimmed = line.trim();
+                if (!trimmed.startsWith('data:')) continue;
+                const jsonStr = trimmed.slice(5).trim();
+                if (jsonStr === '[DONE]') continue;
+                const data = parseJSON(jsonStr);
+                if (data) {
+                  if (data.id) chunkId = data.id;
+                  if (Array.isArray(data.choices) && data.choices[0]) {
+                    const choice = data.choices[0];
+                    if (choice.delta) {
+                      if (choice.delta.content) accumulatedContent += choice.delta.content;
+                      if (choice.delta.reasoning_content) accumulatedReasoning += choice.delta.reasoning_content;
+                      if (choice.delta.reasoning) accumulatedReasoning += choice.delta.reasoning;
+                      if (Array.isArray(choice.delta.tool_calls)) {
+                        for (const tc of choice.delta.tool_calls) {
+                          const idx = tc.index ?? 0;
+                          if (!toolCallsMap.has(idx)) {
+                            toolCallsMap.set(idx, {
+                              id: tc.id || `call_${crypto.randomUUID().slice(0, 8)}`,
+                              type: tc.type || 'function',
+                              function: { name: tc.function?.name || '', arguments: tc.function?.arguments || '' },
+                            });
+                          } else {
+                            const existing = toolCallsMap.get(idx);
+                            if (tc.id) existing.id = tc.id;
+                            if (tc.function?.name) existing.function.name += tc.function.name;
+                            if (tc.function?.arguments) existing.function.arguments += tc.function.arguments;
+                          }
                         }
                       }
                     }
+                    if (choice.finish_reason) finishReason = choice.finish_reason;
                   }
-                  if (choice.finish_reason) finishReason = choice.finish_reason;
                 }
               }
-            }
-          });
+            });
 
-          up.on('end', () => {
-            const outTokens = estimateTokens(accumulatedContent + accumulatedReasoning);
-            const finalToolCalls = Array.from(toolCallsMap.values());
-            const responsePayload = {
-              id: chunkId,
-              object: 'chat.completion',
-              created: Math.floor(startedAt / 1000),
-              model,
-              choices: [
-                {
-                  index: 0,
-                  message: {
-                    role: 'assistant',
-                    content: accumulatedContent,
-                    ...(accumulatedReasoning ? { reasoning_content: accumulatedReasoning } : {}),
-                    ...(finalToolCalls.length > 0 ? { tool_calls: finalToolCalls } : {}),
+            up.on('end', () => {
+              const outTokens = estimateTokens(accumulatedContent + accumulatedReasoning);
+              const finalToolCalls = Array.from(toolCallsMap.values());
+              const responsePayload = {
+                id: chunkId,
+                object: 'chat.completion',
+                created: Math.floor(startedAt / 1000),
+                model,
+                choices: [
+                  {
+                    index: 0,
+                    message: {
+                      role: 'assistant',
+                      content: accumulatedContent,
+                      ...(accumulatedReasoning ? { reasoning_content: accumulatedReasoning } : {}),
+                      ...(finalToolCalls.length > 0 ? { tool_calls: finalToolCalls } : {}),
+                    },
+                    finish_reason: finalToolCalls.length > 0 && (!finishReason || finishReason === 'stop') ? 'tool_calls' : (finishReason || 'stop'),
                   },
-                  finish_reason: finalToolCalls.length > 0 && (!finishReason || finishReason === 'stop') ? 'tool_calls' : (finishReason || 'stop'),
+                ],
+                usage: {
+                  prompt_tokens: inputTokens,
+                  completion_tokens: outTokens,
+                  total_tokens: inputTokens + outTokens,
                 },
-              ],
-              usage: {
-                prompt_tokens: inputTokens,
-                completion_tokens: outTokens,
-                total_tokens: inputTokens + outTokens,
-              },
-            };
-            sendJSON(res, 200, responsePayload);
-            finish(200);
-          });
+              };
+              sendJSON(res, 200, responsePayload);
+              finish(200);
+            });
 
-          up.on('error', (err) => {
-            log('Upstream non-stream error:', err.message);
-            if (!res.headersSent) {
-              sendJSON(res, 502, { error: { message: `Upstream error: ${err.message}` } });
-            } else {
-              res.end();
-            }
-            finish(502);
-          });
+            up.on('error', (err) => {
+              log('Upstream non-stream error:', err.message);
+              if (!res.headersSent) {
+                sendJSON(res, 502, { error: { message: `Upstream error: ${err.message}` } });
+              } else {
+                res.end();
+              }
+              finish(502);
+            });
+          }
+        },
+      );
+
+      req.setTimeout(300000, () => req.destroy(new Error('upstream timeout')));
+      req.on('error', (error) => {
+        if (!res.headersSent) {
+          res.writeHead(502, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: { message: `上游请求失败：${error.message}` } }));
+        } else {
+          res.end();
         }
-      },
-    );
+        finish(0);
+      });
 
-    req.setTimeout(300000, () => req.destroy(new Error('upstream timeout')));
-    req.on('error', (error) => {
-      if (!res.headersSent) {
-        res.writeHead(502, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: { message: `上游请求失败：${error.message}` } }));
-      } else {
-        res.end();
-      }
-      finish(0);
-    });
-    req.write(payload);
-    req.end();
+      req.write(payload);
+      req.end();
+    }
+
+    sendAttempt(originalRequestBody, 0);
   });
 }
 
@@ -1777,6 +2064,18 @@ async function handleControl(req, res, pathname) {
         disabledModels: state.disabledModels || [],
         gatewayPort: GATEWAY_PORT,
         configPath: getOpenCodeConfigPath(),
+        hardened: {
+          active: true,
+          appVersion: clientVersions.appVersion,
+          cliVersion: clientVersions.cliVersion,
+          source: clientVersions.source,
+          features: [
+            'version-sync',
+            'identity-sanitizer',
+            'account-quarantine',
+            'model-detour-6004',
+          ],
+        },
         credits: {
           initialBalance: state.credits.initialBalance,
           currentBalance: state.credits.currentBalance,

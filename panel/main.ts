@@ -101,6 +101,13 @@ interface Status {
   gatewayPort: number;
   configPath: string;
   credits?: Credits;
+  hardened?: {
+    active: boolean;
+    appVersion: string;
+    cliVersion: string;
+    source: string;
+    features: string[];
+  };
 }
 
 type ProbeState = 'pending' | 'ok' | 'fail';
@@ -393,6 +400,18 @@ function renderStatus(status: Status | null): void {
   }
   if (headerTitle) {
     headerTitle.textContent = isChina ? 'CodeBuddy 中国版' : 'WorkBuddy 国际版';
+  }
+
+  const hardenedBadge = document.getElementById('hardenedBadge');
+  if (hardenedBadge) {
+    if (status?.hardened?.active) {
+      hardenedBadge.classList.remove('hidden');
+      const appVer = status.hardened.appVersion || '自适应';
+      const cliVer = status.hardened.cliVersion || '自适应';
+      hardenedBadge.title = `🛡️ 协议加固运行中 (${status.hardened.source})\n• 版本自适应同步: WorkBuddy ${appVer} / CLI ${cliVer}\n• 角色特征打断: System/Dev 提示词中和及零宽字符隔断\n• 11140封号熔断隔绝: 立即隔离单账号，禁止多账号重试连坐\n• 6004模型迂回: 单模型遇限流自动平滑切换候选模型`;
+    } else {
+      hardenedBadge.classList.add('hidden');
+    }
   }
 
   if (status && status.accounts) {

@@ -1,7 +1,7 @@
 {
   "name": "opencode-workbuddy-provider",
-  "version": "1.1.0",
-  "description": "WorkBuddy & CodeBuddy Provider for OpenCode (with OpenChamber Panel support)",
+  "version": "1.2.0",
+  "description": "WorkBuddy & CodeBuddy Provider for OpenCode (with Hardened Protocol & Anti-Ban Protection)",
   "author": "Thelast0802",
   "license": "MIT",
   "main": "service/index.js",
@@ -11,6 +11,7 @@
   "scripts": {
     "start": "node service/index.js",
     "login": "node service/index.js --login",
+    "test": "node test-hardening.js && node test-e2e.js",
     "build": "./build.sh"
   },
   "keywords": [

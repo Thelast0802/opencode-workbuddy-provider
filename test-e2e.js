@@ -201,7 +201,8 @@ async function main() {
     // ── 测试 3：模型列表拉取 + 过滤 ──
     console.log('\n测试 3：模型列表');
     const modelsRes = await request(CONTROL_PORT, 'GET', '/models', { token: TOKEN });
-    const models = modelsRes.body || [];
+    const modelsData = modelsRes.body;
+    const models = Array.isArray(modelsData) ? modelsData : (modelsData && modelsData.models ? modelsData.models : []);
     check('返回 2 个模型（auto / nes-legacy 已过滤）', models.length === 2, `实际 ${models.length}`);
     check(
       '包含 gpt-5.5 且带上下文窗口',
